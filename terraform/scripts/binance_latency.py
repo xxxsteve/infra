@@ -2,6 +2,11 @@
 """
 Binance Latency Test Script
 Tests latency to various Binance endpoints using multiple methods.
+
+# how to set environment variables:
+export BINANCE_ENDPOINTS='{"test_api": "192.168.1.1"}'
+export DISABLE_SSL=1  # disable SSL
+
 """
 
 import socket
@@ -21,6 +26,11 @@ ENDPOINTS = {
     "spot_ws": "stream.binance.com",
     "futures_ws": "fstream.binance.com"
 }
+
+# SSL configuration - can be overridden by environment variable
+# export DISABLE_SSL=1  (any value) to disable SSL
+USE_SSL = "DISABLE_SSL" not in os.environ
+DEFAULT_PORT = 443 if USE_SSL else 80
 
 def tcp_ping(host, port=443, count=10):
     """Measure TCP connection latency"""
@@ -48,15 +58,17 @@ def http_ping(host, count=10):
     """Measure HTTP request latency"""
     latencies = []
     
+    protocol = "https" if USE_SSL else "http"
+    
     # Use /api/v3/ping for spot API, /fapi/v1/ping for futures
     if host == "fapi.binance.com":
-        url = "https://fapi.binance.com/fapi/v1/ping"
+        url = f"{protocol}://fapi.binance.com/fapi/v1/ping"
     elif host == "dapi.binance.com":
-        url = "https://dapi.binance.com/dapi/v1/ping"
+        url = f"{protocol}://dapi.binance.com/dapi/v1/ping"
     elif host == "api.binance.com":
-        url = "https://api.binance.com/api/v3/ping"
+        url = f"{protocol}://api.binance.com/api/v3/ping"
     else:
-        url = f"https://{host}"
+        url = f"{protocol}://{host}"
     
     session = requests.Session()
     
@@ -78,7 +90,7 @@ def http_ping(host, count=10):
 def dns_lookup(host):
     """Get DNS resolution info"""
     try:
-        result = socket.getaddrinfo(host, 443, socket.AF_INET)
+        result = socket.getaddrinfo(host, DEFAULT_PORT, socket.AF_INET)
         ips = list(set([r[4][0] for r in result]))
         return ips
     except Exception as e:
@@ -151,8 +163,8 @@ def main():
             print(f"  {ip}")
         
         # TCP ping
-        print("\nTCP Ping (port 443):")
-        tcp_latencies = tcp_ping(host, 443, 20)
+        print(f"\nTCP Ping (port {DEFAULT_PORT}):")
+        tcp_latencies = tcp_ping(host, DEFAULT_PORT, 20)
         tcp_stats = analyze_latencies(tcp_latencies)
         if tcp_stats:
             print(f"  Min: {tcp_stats['min']:.3f} ms")

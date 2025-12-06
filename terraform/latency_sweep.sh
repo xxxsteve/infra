@@ -24,10 +24,11 @@ MAX_WAIT="${MAX_WAIT:-600}"              # max seconds to wait for results (10 m
 TARGET_LATENCY="${TARGET_LATENCY:-1}"    # Keep instances below this latency (ms)
 NUM_INSTANCES="${NUM_INSTANCES:-2}"      # Number of instances to test
 
-# Results file
-RESULTS_FILE="latency_results_$(date +%Y%m%d_%H%M%S).csv"
-RESULTS_DIR="./results_$(date +%Y%m%d_%H%M%S)"
+# Results directory (all results go here)
+RESULTS_BASE="./results"
+RESULTS_DIR="$RESULTS_BASE/$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$RESULTS_DIR"
+RESULTS_FILE="$RESULTS_DIR/latency_results.csv"
 
 echo "region,az,instance,min_tcp_ms,avg_tcp_ms,p95_tcp_ms,min_http_ms,avg_http_ms,p95_http_ms,instance_ip,kept" > "$RESULTS_FILE"
 

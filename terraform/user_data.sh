@@ -28,9 +28,8 @@ echo "Scripts downloaded. Running latency test..."
 
 sleep 10
 
-# Set endpoints as environment variable and run test
-export BINANCE_ENDPOINTS='${binance_endpoints}'
-su - ubuntu -c "cd /home/ubuntu/latency_tests && BINANCE_ENDPOINTS='${binance_endpoints}' python3 binance_latency.py" > /tmp/latency_test.log 2>&1
+# Run test with endpoints
+su - ubuntu -c 'cd /home/ubuntu/latency_tests && BINANCE_ENDPOINTS='"'"'${binance_endpoints}'"'"' python3 binance_latency.py' > /home/ubuntu/latency_tests/latency_test.log 2>&1
 
 # Upload results
 RESULTS_FILE=$(ls -t /home/ubuntu/latency_tests/results_*.json 2>/dev/null | head -1)
@@ -38,6 +37,6 @@ if [ -n "$RESULTS_FILE" ]; then
     FILENAME="results_${region}_${availability_zone}_$(date +%s).json"
     aws s3 cp "$RESULTS_FILE" "s3://${s3_bucket}/$FILENAME" --region ${region} && echo "Results uploaded to S3"
 else
-    aws s3 cp /tmp/latency_test.log "s3://${s3_bucket}/error_${region}_${availability_zone}_$(date +%s).log" --region ${region}
+    aws s3 cp /home/ubuntu/latency_tests/latency_test.log "s3://${s3_bucket}/error_${region}_${availability_zone}_$(date +%s).log" --region ${region}
 fi
 echo "Done!"

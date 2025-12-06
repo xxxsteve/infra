@@ -54,8 +54,8 @@ terraform init
 ### Step 4: Check Results
 
 Results saved to:
-- `latency_results_<timestamp>.csv`
-- `./results_<timestamp>/` directory
+- `./results/<timestamp>/latency_results.csv`
+- `./results/<timestamp>/` directory (includes JSON files)
 
 ---
 
