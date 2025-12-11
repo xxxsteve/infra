@@ -3,6 +3,8 @@
 
 set -e
 
+export AWS_PROFILE=default
+
 # Configuration
 # Read defaults from terraform.tfvars (single source of truth)
 TFVARS_FILE="terraform.tfvars"
@@ -29,6 +31,26 @@ RESULTS_BASE="./results"
 RESULTS_DIR="$RESULTS_BASE/$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$RESULTS_DIR"
 RESULTS_FILE="$RESULTS_DIR/latency_results.csv"
+LOG_FILE="$RESULTS_DIR/run.log"
+
+# Log function: echo to terminal AND append to log file
+log() {
+    echo "$@" | tee -a "$LOG_FILE"
+}
+
+
+# TODO: REMOVE THIS MONKEY PATCH after fixing IAM permissions
+# Remove IAM resources from state before destroy (no delete permission)
+# Terraform Resource	                       AWS Name
+# aws_s3_bucket.results	                       binance-latency-results-{{project_name}}
+# aws_iam_role.instance_role	               {{project_name}}-instance-role
+# aws_iam_role_policy.s3_access	               {{project_name}}-s3-access
+# aws_iam_instance_profile.instance_profile	   {{project_name}}-instance-profile
+remove_iam_from_state() {
+    terraform state rm aws_iam_role_policy.s3_access 2>/dev/null || true
+    terraform state rm aws_iam_role.instance_role 2>/dev/null || true
+    terraform state rm aws_iam_instance_profile.instance_profile 2>/dev/null || true
+}
 
 echo "region,az,instance,min_tcp_ms,avg_tcp_ms,p95_tcp_ms,min_http_ms,avg_http_ms,p95_http_ms,instance_ip,kept" > "$RESULTS_FILE"
 
@@ -55,20 +77,30 @@ test_instance() {
     
     if [ $? -ne 0 ]; then
         echo "ERROR: Failed to deploy in $region/$az"
+        remove_iam_from_state
         terraform destroy -auto-approve 2>/dev/null || true
         return 1
     fi
     
-    # Get S3 bucket name
-    local s3_bucket
-    s3_bucket=$(terraform output -raw s3_bucket_name)
+    # Get instance info immediately after creation
+    local instance_id instance_ip s3_bucket
+    instance_id=$(terraform output -raw instance_id || echo "unknown")
+    instance_ip=$(terraform output -raw instance_public_ip || echo "unknown")
+    s3_bucket=$(terraform output -raw s3_bucket_name || echo "unknown")
     
-    # Get instance ID for monitoring
-    local instance_id
-    instance_id=$(terraform output -raw instance_id 2>/dev/null || echo "unknown")
+    # Log EC2 info prominently for debugging
+    log ""
+    log "╔════════════════════════════════════════════════════════════╗"
+    log "║  EC2 INSTANCE CREATED                                      ║"
+    log "╠════════════════════════════════════════════════════════════╣"
+    log "║  Instance ID: $instance_id"
+    log "║  Public IP:   $instance_ip"
+    log "║  Region:      $region"
+    log "║  AZ:          $az"
+    log "║  S3 Bucket:   $s3_bucket"
+    log "╚════════════════════════════════════════════════════════════╝"
+    log ""
     
-    echo "Instance deployed: $instance_id"
-    echo "S3 bucket: $s3_bucket"
     echo "Instance will auto-run test and upload results to S3..."
     echo "Waiting for results (checking S3 every ${POLL_INTERVAL}s)..."
     
@@ -121,6 +153,7 @@ test_instance() {
         echo "⚠ Timeout: No results received after ${MAX_WAIT}s"
         echo "Check instance logs or S3 bucket for errors"
         echo "$region,$az,$instance_num,TIMEOUT,TIMEOUT,TIMEOUT,TIMEOUT,TIMEOUT,TIMEOUT,N/A,destroyed" >> "$RESULTS_FILE"
+        remove_iam_from_state
         terraform destroy -auto-approve
         return 1
     fi
@@ -147,6 +180,7 @@ test_instance() {
         echo "Destroying instance #$instance_num (latency: ${avg_tcp}ms >= ${TARGET_LATENCY}ms)..."
         # Update CSV to mark as destroyed
         sed -i "s/$region,$az,$instance_num,.*,pending$/$region,$az,$instance_num,$min_tcp,$avg_tcp,$p95_tcp,$min_http,$avg_http,$p95_http,$instance_ip,destroyed/" "$RESULTS_FILE"
+        remove_iam_from_state
         terraform destroy -auto-approve
     fi
     

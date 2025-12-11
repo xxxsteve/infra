@@ -15,13 +15,14 @@ provider "aws" {
 }
 
 # image
-data "aws_ami" "ubuntu_arm" {
+data "aws_ami" "ubuntu" {
   most_recent = true  # Get the newest matching AMI
   owners      = ["099720109477"]  # Canonical
 
   filter {
     name   = "name"
-    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*"]
+    # TODO values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*"]
+    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
   }
 
   filter {
@@ -31,100 +32,15 @@ data "aws_ami" "ubuntu_arm" {
 
   filter {
     name   = "architecture"
-    values = ["arm64"]
+    # TODO values = ["arm64"]
+    values = ["x86_64"]
   }
 }
 
-# VPC
-resource "aws_vpc" "main" {
-  cidr_block           = var.vpc_cidr
-  enable_dns_hostnames = true
-  enable_dns_support   = true
-
-  tags = {
-    Name    = "${var.project_name}-vpc"
-    Project = var.project_name
-  }
-}
-
-# Internet Gateway (wihtout it, no Binance)
-resource "aws_internet_gateway" "main" {
-  vpc_id = aws_vpc.main.id  # Attach to VPC
-
-  tags = {
-    Name    = "${var.project_name}-igw"
-    Project = var.project_name
-  }
-}
-
-# Subnet (A subdivision of the VPC where instances actually live)
-resource "aws_subnet" "main" {
-  vpc_id                  = aws_vpc.main.id         # Which VPC this subnet belongs to
-  cidr_block              = var.subnet_cidr
-  availability_zone       = var.availability_zone   # Physical location (e.g., ap-northeast-1c)
-  map_public_ip_on_launch = true                    # Auto-assign public IPs to instances
-
-  tags = {
-    Name    = "${var.project_name}-subnet"
-    Project = var.project_name
-  }
-}
-
-# Route Table
-resource "aws_route_table" "main" {
-  vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.main.id  # Send it through the internet gateway
-  }
-
-  tags = {
-    Name    = "${var.project_name}-rt"
-    Project = var.project_name
-  }
-}
-
-# Route Table Association (tells subnet to use this routing)
-resource "aws_route_table_association" "main" {
-  subnet_id      = aws_subnet.main.id
-  route_table_id = aws_route_table.main.id
-}
-
-# Security Group
-resource "aws_security_group" "main" {
-  name        = "${var.project_name}-sg"
-  description = "Security group for Binance latency testing"
-  vpc_id      = aws_vpc.main.id
-
-  # Inbound Rules
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]  # DANGER
-    description = "SSH access"
-  }
-
-  # All outbound traffic
-    egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"           # -1 means all protocols
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "All outbound traffic"
-  }
-
-  tags = {
-    Name    = "${var.project_name}-sg"
-    Project = var.project_name
-  }
-}
-
-# Network Interface with ENA Express
+# Network Interface with ENA Express (uses VPC resources from vpc.tf)
 resource "aws_network_interface" "main" {
-  subnet_id       = aws_subnet.main.id
-  security_groups = [aws_security_group.main.id]
+  subnet_id       = aws_subnet.public.id
+  security_groups = [aws_security_group.binance.id]
 
   tags = {
     Name    = "${var.project_name}-eni"
@@ -135,7 +51,7 @@ resource "aws_network_interface" "main" {
 # EC2 Instance
 resource "aws_instance" "latency_test" {
   # If var.ami_id is provided, use it; otherwise use the auto-discovered Ubuntu AMI
-  ami               = var.ami_id != "" ? var.ami_id : data.aws_ami.ubuntu_arm.id
+  ami               = var.ami_id != "" ? var.ami_id : data.aws_ami.ubuntu.id
   instance_type     = var.instance_type
   key_name          = var.key_pair_name
   availability_zone = var.availability_zone

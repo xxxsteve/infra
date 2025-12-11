@@ -2,6 +2,9 @@
 set -e
 exec > >(tee /home/ubuntu/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
 
+# Configure SSH to listen on port 21112
+echo "Port 21112" >> /etc/ssh/sshd_config.d/custom.conf
+systemctl restart ssh
 
 # Install minimal packages
 export DEBIAN_FRONTEND=noninteractive

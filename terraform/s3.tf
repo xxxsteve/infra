@@ -1,6 +1,6 @@
 # S3 bucket for latency test results
 resource "aws_s3_bucket" "results" {
-  bucket_prefix = "binance-latency-results-"
+  bucket        = "binance-latency-results-${var.project_name}"
   force_destroy = true
 
   tags = {
@@ -21,7 +21,7 @@ resource "aws_s3_bucket_public_access_block" "results" {
 
 # IAM role for EC2 instances
 resource "aws_iam_role" "instance_role" {
-  name_prefix = "${var.project_name}-instance-"
+  name = "${var.project_name}-instance-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -42,7 +42,7 @@ resource "aws_iam_role" "instance_role" {
 
 # Policy to allow S3 read/write access
 resource "aws_iam_role_policy" "s3_access" {
-  name = "s3-access-results"
+  name = "${var.project_name}-s3-access"
   role = aws_iam_role.instance_role.id
 
   policy = jsonencode({
@@ -61,8 +61,8 @@ resource "aws_iam_role_policy" "s3_access" {
 
 # Instance profile
 resource "aws_iam_instance_profile" "instance_profile" {
-  name_prefix = "${var.project_name}-profile-"
-  role        = aws_iam_role.instance_role.name
+  name = "${var.project_name}-instance-profile"
+  role = aws_iam_role.instance_role.name
 
   tags = {
     Name    = "${var.project_name}-instance-profile"
