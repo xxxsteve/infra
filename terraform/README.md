@@ -70,22 +70,26 @@ Results saved to:
 # This all happens in user_data.sh
 ```
 
-**3. Script Runs Test Automatically**
+**3. Script Runs Tests Automatically**
 ```bash
 # At the end of user_data.sh:
-su - ubuntu -c 'python3 binance_latency.py'
+# Network path analysis (DNS, traceroute, MTR)
+python3 binance_latency.py
+
+# Full latency test suite (TCP, WS Ping/Pong, Trade Stream)
+python3 ws_latency.py --method full --samples 1000 --host fstream.binance.com
 ```
 
 **4. Results Upload to S3**
 ```bash
-aws s3 cp results.json s3://bucket-name/results_<region>_<az>_<timestamp>.json
+aws s3 cp latency.log s3://bucket-name/latency_<region>_<az>_<timestamp>.log
 ```
 
 **5. Script Polls S3**
 ```bash
 # Every 30 seconds:
-aws s3 ls s3://bucket-name/results_*
-# When file appears → download it
+aws s3 ls s3://bucket-name/latency_*
+# When file appears → download and parse P99 latencies
 ```
 
 **6. Parse and Destroy**
@@ -151,10 +155,10 @@ terraform destroy
 
 | File | Description |
 |------|-------------|
-| `main.tf` | Core infrastructure (VPC, subnet, EC2, security groups, outputs) |
-| `s3_backend.tf` | S3 bucket and IAM roles for auto-reporting |
-| `variables.tf` | Input variable definitions |
-| `user_data.sh` | Instance initialization script (runs on boot) |
-| `terraform.tfvars` | Your custom variable values |
-| `latency_sweep.sh` | Automated latency testing script |
-| `scripts` | helpler scripts |
+| `ec2/` | EC2 instance terraform (VPC, subnet, security groups) |
+| `shared/` | Shared resources (S3 bucket, IAM roles) |
+| `scripts/binance_latency.py` | Network path analytics (DNS, traceroute, MTR) |
+| `scripts/ws_latency.py` | P99 latency testing (TCP, WS ping/pong, trade stream) |
+| `scripts/tune_system.sh` | System tuning for low latency |
+| `latency_sweep.sh` | Automated latency testing orchestration |
+| `results/` | Test results (CSV and logs) |
