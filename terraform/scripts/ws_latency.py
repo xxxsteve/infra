@@ -22,6 +22,7 @@ import json
 import socket
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -88,7 +89,7 @@ class WSPingPongLatency:
         # old: "wss://stream.binance.com:9443/ws/btcusdt@trade"
         self.endpoint = endpoint
         self.stats = LatencyStats()
-        self.ping_send_time = None
+        self.pending_pings = deque()  # FIFO queue of send_time_ns
         self.ws = None
         self.sock = None
         self.running = False
@@ -107,10 +108,12 @@ class WSPingPongLatency:
         recv_time = time.perf_counter_ns()
         
         with self.lock:
-            if self.ping_send_time is not None:
-                latency_ms = (recv_time - self.ping_send_time) / 1_000_000
+            # Match pong to oldest pending ping (FIFO)
+            if self.pending_pings:
+                send_time = self.pending_pings.popleft()
+                latency_ms = (recv_time - send_time) / 1_000_000
                 self.stats.add(latency_ms)
-                self.ping_send_time = None
+            # else: stray pong (shouldn't happen)
     
     def on_error(self, ws, error):
         print(f"Error: {error}")
@@ -124,8 +127,9 @@ class WSPingPongLatency:
         """Send a ping and record the time"""
         if self.sock and self.running:
             with self.lock:
-                self.ping_send_time = time.perf_counter_ns()
+                send_time = time.perf_counter_ns()
                 self.sock.ping()
+                self.pending_pings.append(send_time)
     
     def run(self, samples: int = 1000, interval_ms: int = 200):
         """
@@ -177,7 +181,14 @@ class WSPingPongLatency:
         for _ in range(5):
             self.send_ping()
             time.sleep(0.25)  # 250ms = 4/sec, safely under limit
-        self.stats = LatencyStats()  # Reset stats after warmup
+        
+        # Wait for warmup pongs to arrive
+        time.sleep(1.0)
+        
+        # Reset stats and counters after warmup
+        with self.lock:
+            self.stats = LatencyStats()
+            self.pending_pings.clear()
         
         # Main measurement loop
         print(f"Collecting {samples} samples...")
@@ -186,7 +197,8 @@ class WSPingPongLatency:
         while collected < samples and self.running:
             self.send_ping()
             time.sleep(interval_ms / 1000)
-            collected = len(self.stats.samples)
+            with self.lock:
+                collected = len(self.stats.samples)
             
             # Print progress every 50 samples or 10 seconds
             if collected >= last_print + 50:
@@ -195,7 +207,12 @@ class WSPingPongLatency:
                 last_print = collected
         
         # Wait for last pongs
-        time.sleep(0.5)
+        time.sleep(1.0)
+        
+        # Check for any lost pongs
+        with self.lock:
+            if self.pending_pings:
+                print(f"Warning: {len(self.pending_pings)} pings never received pongs")
         
         self.ws.close()
         self.stats.print_stats("WS Ping/Pong Round-Trip Latency")
@@ -416,8 +433,8 @@ def run_full_stack(host: str, samples: int = 200):
     if tcp_stats:
         results["tcp_connect"] = tcp_stats.compute()
 
-    # 2. WS Ping/Pong
-    ping_test = WSPingPongLatency(f"wss://{host}/ws/btcusdt@trade")
+    # 2. WS Ping/Pong (use bare /ws endpoint, not a stream, to avoid message queue delays)
+    ping_test = WSPingPongLatency(f"wss://{host}/ws")
     ping_stats = ping_test.run(samples=min(samples, 100), interval_ms=250)
     if ping_stats:
         results["ws_ping_pong"] = ping_stats.compute()
@@ -466,9 +483,9 @@ def main():
 
     if args.method == "tcp":
         test = TCPConnectLatency(args.host, 443)
-        stats = test.run(samples=args.samples, interval_ms=args.interval)
+        stats = test.run(samples=args.samples, interval_ms=20)
     elif args.method == "ping":
-        endpoint = f"wss://{args.host}/ws/{args.symbol}@trade"
+        endpoint = f"wss://{args.host}/ws"
         test = WSPingPongLatency(endpoint)
         stats = test.run(samples=args.samples, interval_ms=args.interval)
     elif args.method == "trade":

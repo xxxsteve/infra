@@ -25,9 +25,9 @@ INSTANCE_TYPE="${INSTANCE_TYPE:-$(read_tfvar instance_type)}"
 
 # Script-only variables (not in Terraform)
 POLL_INTERVAL="${POLL_INTERVAL:-30}"     # how often to check S3 for results
-MAX_WAIT="${MAX_WAIT:-300}"              # max seconds to wait for results (5 min)
+MAX_WAIT="${MAX_WAIT:-600}"              # max seconds to wait for results (5 min)
 TARGET_LATENCY="${TARGET_LATENCY:-1}"    # Keep instances below this latency (ms)
-NUM_INSTANCES="${NUM_INSTANCES:-2}"      # Number of instances to test
+NUM_INSTANCES="${NUM_INSTANCES:-5}"      # Number of instances to test
 
 # Results directory (all results go here)
 RESULTS_BASE="$SCRIPT_DIR/results"
@@ -59,7 +59,13 @@ test_instance() {
     # Create workspace for this test
     local workspace_name="${region}_${az//-/_}_inst${instance_num}"
     terraform workspace new "$workspace_name" 2>/dev/null || terraform workspace select "$workspace_name"
-    
+
+    # Clean up old S3 result files to avoid false matches
+    local s3_bucket_name="binance-latency-results-steven"
+    local s3_prefix="results/latency_${region}_${az}_inst${instance_num}_"
+    echo "Cleaning up old S3 results with prefix: $s3_prefix"
+    aws s3 rm "s3://$s3_bucket_name/" --recursive --exclude "*" --include "${s3_prefix}*" 2>/dev/null || true
+
     # Apply terraform
     terraform apply -auto-approve \
         -var "aws_region=$region" \
@@ -102,7 +108,7 @@ test_instance() {
     while [ $waited -lt $MAX_WAIT ]; do
         # Check if latency log file exists in S3
         local s3_results
-        s3_results=$(aws s3 ls "s3://$s3_bucket/latency_${region}_${az}_inst${instance_num}_" --region "$region" 2>/dev/null | tail -1 || true)
+        s3_results=$(aws s3 ls "s3://$s3_bucket/results/latency_${region}_${az}_inst${instance_num}_" --region "$region" 2>/dev/null | tail -1 || true)
         
         if [ -n "$s3_results" ]; then
             echo "✓ Results found in S3!"
@@ -113,7 +119,7 @@ test_instance() {
             
             # Download results log
             local local_file="$RESULTS_DIR/${region}_${az}_inst${instance_num}_latency.log"
-            aws s3 cp "s3://$s3_bucket/$s3_filename" "$local_file" --region "$region"
+            aws s3 cp "s3://$s3_bucket/results/$s3_filename" "$local_file" --region "$region"
             
             # Parse P99 results from log (format: "  tcp_connect          : 0.123 ms")
             local tcp_p99 ping_p99 trade_p99
@@ -145,7 +151,7 @@ test_instance() {
         return 1
     fi
     
-    # Cleanup decision based on TODO!!! (for now) TCP P99 latency
+    # Cleanup decision based on TCP Connect P99 latency from ws_latency.py
     local should_destroy=true
     local instance_ip
     instance_ip=$(terraform output -raw instance_public_ip 2>/dev/null || echo 'N/A')
@@ -164,7 +170,7 @@ test_instance() {
     fi
     
     if [ "$should_destroy" = true ]; then
-        echo "Destroying instance #$instance_num (TCP P99: ${tcp_p99}ms >= ${TARGET_LATENCY}ms)..."
+        echo "Destroying instance #$instance_num (TCP Connect P99: ${tcp_p99}ms >= ${TARGET_LATENCY}ms)..."
         # Update CSV to mark as destroyed
         sed -i "s/$region,$az,$instance_num,.*,pending$/$region,$az,$instance_num,$tcp_p99,$ping_p99,$trade_p99,$instance_ip,destroyed/" "$RESULTS_FILE"
         terraform destroy -auto-approve
@@ -222,8 +228,8 @@ S3_BUCKET=$(terraform output -raw s3_bucket_name)
 echo "✓ Shared resources ready. S3 bucket: $S3_BUCKET"
 
 echo "Clearing previous results from S3..."
-aws s3 rm "s3://$S3_BUCKET/" --recursive --exclude "scripts/*" 2>/dev/null || true
-echo "✓ S3 bucket cleared (scripts preserved)"
+aws s3 rm "s3://$S3_BUCKET/results/" --recursive 2>/dev/null || true
+echo "✓ S3 results folder cleared"
 
 # ==========================================
 # STEP 2: Initialize EC2 terraform
@@ -255,7 +261,7 @@ echo ""
 echo "Results saved to: $RESULTS_FILE"
 echo "Downloaded JSON files in: $RESULTS_DIR"
 echo ""
-echo "All tested instances (sorted by TCP P99 latency):"
+echo "All tested instances (sorted by TCP Connect P99 latency):"
 echo ""
 sort -t',' -k4 -n "$RESULTS_FILE" | column -t -s','
 
@@ -264,7 +270,7 @@ echo ""
 echo "=========================================="
 kept_count=$(grep -c ",KEPT$" "$RESULTS_FILE" || echo "0")
 if [ "$kept_count" -gt 0 ]; then
-    echo "🎯 KEPT INSTANCES (latency < ${TARGET_LATENCY}ms):"
+    echo "🎯 KEPT INSTANCES (TCP Connect P99 < ${TARGET_LATENCY}ms):"
     echo ""
     grep ",KEPT$" "$RESULTS_FILE" | sort -t',' -k4 -n | column -t -s','
 else
@@ -281,14 +287,16 @@ echo "🏆 BEST MACHINE:"
 best_line=$(sort -t',' -k4 -n "$RESULTS_FILE" | grep -v TIMEOUT | grep -v "region" | head -1)
 echo "$best_line" | column -t -s','
 
-best_latency=$(echo "$best_line" | cut -d',' -f4)
+best_tcp_p99=$(echo "$best_line" | cut -d',' -f4)
+best_ping_p99=$(echo "$best_line" | cut -d',' -f5)
 best_ip=$(echo "$best_line" | cut -d',' -f7)
 best_status=$(echo "$best_line" | cut -d',' -f8)
 
 echo ""
 if [ "$best_status" = "KEPT" ]; then
     echo "✅ Best machine is running at: $best_ip"
-    echo "   TCP P99 Latency: ${best_latency}ms"
+    echo "   TCP Connect P99: ${best_tcp_p99}ms"
+    echo "   WS Ping/Pong P99: ${best_ping_p99}ms (reference)"
 else
-    echo "Best TCP P99 latency achieved: ${best_latency}ms (instance was destroyed)"
+    echo "Best TCP Connect P99 latency achieved: ${best_tcp_p99}ms (instance was destroyed)"
 fi

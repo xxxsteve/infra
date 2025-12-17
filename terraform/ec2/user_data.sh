@@ -10,7 +10,15 @@ systemctl restart ssh.socket ssh
 # Install minimal packages
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y python3 python3-pip jq mtr traceroute
+apt-get install -y python3 python3-pip jq mtr traceroute chrony
+
+# Configure and start chrony for accurate NTP sync
+systemctl enable chrony
+systemctl start chrony
+sleep 3
+chronyc makestep  # Force immediate sync
+echo "NTP sync status:"
+chronyc tracking | head -5
 
 # Install Python packages
 pip3 install --break-system-packages websocket-client numpy awscli
@@ -42,17 +50,17 @@ su - ubuntu -c 'cd /home/ubuntu/latency_tests && BINANCE_ENDPOINTS='"'"'${binanc
 # Upload network analysis results
 RESULTS_FILE=$(ls -t /home/ubuntu/latency_tests/network_analysis_*.json 2>/dev/null | head -1)
 if [ -n "$RESULTS_FILE" ]; then
-    FILENAME="network_analysis_${region}_${availability_zone}_inst${instance_num}_$(date +%s).json"
+    FILENAME="results/network_analysis_${region}_${availability_zone}_inst${instance_num}_$(date +%s).json"
     aws s3 cp "$RESULTS_FILE" "s3://${s3_bucket}/$FILENAME" --region ${region} && echo "Network analysis uploaded to S3"
-else
-    aws s3 cp /home/ubuntu/latency_tests/network_analysis.log "s3://${s3_bucket}/error_network_${region}_${availability_zone}_inst${instance_num}_$(date +%s).log" --region ${region}
+    else
+    aws s3 cp /home/ubuntu/latency_tests/network_analysis.log "s3://${s3_bucket}/results/error_network_${region}_${availability_zone}_inst${instance_num}_$(date +%s).log" --region ${region}
 fi
 
 # Run full latency test suite (TCP, WS Ping/Pong, Trade Stream)
 echo "Running full latency test suite..."
-su - ubuntu -c 'cd /home/ubuntu/latency_tests && python3 ws_latency.py --method full --samples 1000 --host fstream.binance.com' > /home/ubuntu/latency_tests/latency.log 2>&1
+su - ubuntu -c 'cd /home/ubuntu/latency_tests && python3 ws_latency.py --method full --samples 1000 --host fstream.binance.com > /home/ubuntu/latency_tests/latency.log 2>&1'
 
 # Upload log
-aws s3 cp /home/ubuntu/latency_tests/latency.log "s3://${s3_bucket}/latency_${region}_${availability_zone}_inst${instance_num}_$(date +%s).log" --region ${region}
+aws s3 cp /home/ubuntu/latency_tests/latency.log "s3://${s3_bucket}/results/latency_${region}_${availability_zone}_inst${instance_num}_$(date +%s).log" --region ${region}
 
 echo "Done! All tests completed and results uploaded"
