@@ -38,10 +38,10 @@ def run_traceroute(host):
     """Run traceroute to endpoint"""
     try:
         result = subprocess.run(
-            ["traceroute", "-n", "-q", "1", "-w", "2", host],
+            ["traceroute", "-n", "-q", "1", "-w", "1", host],
             capture_output=True,
             text=True,
-            timeout=30
+            timeout=20
         )
         return result.stdout
     except Exception as e:
@@ -51,10 +51,10 @@ def run_mtr(host):
     """Run MTR for detailed path analysis"""
     try:
         result = subprocess.run(
-            ["mtr", "-r", "-c", "10", "-n", host],
+            ["mtr", "-r", "-c", "5", "-n", host],
             capture_output=True,
             text=True,
-            timeout=60
+            timeout=30
         )
         return result.stdout
     except Exception as e:

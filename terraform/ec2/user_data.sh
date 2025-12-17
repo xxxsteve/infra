@@ -29,7 +29,7 @@ cd /home/ubuntu/latency_tests
 
 # Download scripts from S3
 echo "Downloading scripts from S3..."
-aws s3 cp "s3://${s3_bucket}/scripts/binance_latency.py" /home/ubuntu/latency_tests/binance_latency.py --region ${region}
+aws s3 cp "s3://${s3_bucket}/scripts/network_analysis.py" /home/ubuntu/latency_tests/network_analysis.py --region ${region}
 aws s3 cp "s3://${s3_bucket}/scripts/ws_latency.py" /home/ubuntu/latency_tests/ws_latency.py --region ${region}
 aws s3 cp "s3://${s3_bucket}/scripts/tune_system.sh" /home/ubuntu/latency_tests/tune_system.sh --region ${region}
 
@@ -45,7 +45,7 @@ bash /home/ubuntu/latency_tests/tune_system.sh
 sleep 10
 
 # Run network path analysis (DNS, traceroute, MTR)
-su - ubuntu -c 'cd /home/ubuntu/latency_tests && BINANCE_ENDPOINTS='"'"'${binance_endpoints}'"'"' python3 binance_latency.py' > /home/ubuntu/latency_tests/network_analysis.log 2>&1
+su - ubuntu -c 'cd /home/ubuntu/latency_tests && BINANCE_ENDPOINTS='"'"'${binance_endpoints}'"'"' python3 network_analysis.py' > /home/ubuntu/latency_tests/network_analysis.log 2>&1
 
 # Upload network analysis results
 RESULTS_FILE=$(ls -t /home/ubuntu/latency_tests/network_analysis_*.json 2>/dev/null | head -1)

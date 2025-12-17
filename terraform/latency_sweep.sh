@@ -27,7 +27,7 @@ INSTANCE_TYPE="${INSTANCE_TYPE:-$(read_tfvar instance_type)}"
 POLL_INTERVAL="${POLL_INTERVAL:-30}"     # how often to check S3 for results
 MAX_WAIT="${MAX_WAIT:-600}"              # max seconds to wait for results (5 min)
 TARGET_LATENCY="${TARGET_LATENCY:-1}"    # Keep instances below this latency (ms)
-NUM_INSTANCES="${NUM_INSTANCES:-5}"      # Number of instances to test
+NUM_INSTANCES="${NUM_INSTANCES:-60}"      # Number of instances to test
 
 # Results directory (all results go here)
 RESULTS_BASE="$SCRIPT_DIR/results"
@@ -270,7 +270,8 @@ sort -t',' -k4 -n "$RESULTS_FILE" | column -t -s','
 # Show kept instances
 echo ""
 echo "=========================================="
-kept_count=$(grep -c ",KEPT$" "$RESULTS_FILE" || echo "0")
+kept_count=$(grep -c ",KEPT$" "$RESULTS_FILE" 2>/dev/null || echo "0")
+kept_count=$(echo "$kept_count" | tr -d '\n\r' | head -1)
 if [ "$kept_count" -gt 0 ]; then
     echo "🎯 KEPT INSTANCES (TCP Connect P99 < ${TARGET_LATENCY}ms):"
     echo ""

@@ -86,11 +86,11 @@ resource "aws_iam_instance_profile" "instance_profile" {
 }
 
 # Upload test scripts to S3
-resource "aws_s3_object" "binance_latency_script" {
+resource "aws_s3_object" "network_analysis_script" {
   bucket = aws_s3_bucket.results.id
-  key    = "scripts/binance_latency.py"
-  source = "${path.module}/../scripts/binance_latency.py"
-  etag   = filemd5("${path.module}/../scripts/binance_latency.py")
+  key    = "scripts/network_analysis.py"
+  source = "${path.module}/../scripts/network_analysis.py"
+  etag   = filemd5("${path.module}/../scripts/network_analysis.py")
 }
 
 resource "aws_s3_object" "ws_latency_script" {
