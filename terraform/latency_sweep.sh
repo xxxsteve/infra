@@ -35,6 +35,7 @@ RESULTS_DIR="$RESULTS_BASE/$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$RESULTS_DIR"
 RESULTS_FILE="$RESULTS_DIR/latency_results.csv"
 LOG_FILE="$RESULTS_DIR/run.log"
+TERRAFORM_LOG="$RESULTS_DIR/terraform.log"
 
 # Log function: echo to terminal AND append to log file
 log() {
@@ -67,15 +68,16 @@ test_instance() {
     aws s3 rm "s3://$s3_bucket_name/" --recursive --exclude "*" --include "${s3_prefix}*" 2>/dev/null || true
 
     # Apply terraform
-    terraform apply -auto-approve \
+    echo "  Creating instance..."
+    terraform apply -auto-approve -compact-warnings \
         -var "aws_region=$region" \
         -var "availability_zone=$az" \
         -var "instance_type=$INSTANCE_TYPE" \
-        -var "instance_num=$instance_num"
+        -var "instance_num=$instance_num" >> "$TERRAFORM_LOG" 2>&1
     
     if [ $? -ne 0 ]; then
         echo "ERROR: Failed to deploy in $region/$az"
-        terraform destroy -auto-approve 2>/dev/null || true
+        terraform destroy -auto-approve >> "$TERRAFORM_LOG" 2>&1 || true
         return 1
     fi
     
@@ -88,7 +90,7 @@ test_instance() {
     # Log EC2 info prominently for debugging
     log ""
     log "╔════════════════════════════════════════════════════════════╗"
-    log "║  EC2 INSTANCE CREATED                                      ║"
+    log "║  EC2 INSTANCE CREATED #$instance_num                       ║"
     log "╠════════════════════════════════════════════════════════════╣"
     log "║  Instance ID: $instance_id"
     log "║  Public IP:   $instance_ip"
@@ -147,7 +149,7 @@ test_instance() {
         echo "⚠ Timeout: No results received after ${MAX_WAIT}s"
         echo "Check instance logs or S3 bucket for errors"
         echo "$region,$az,$instance_num,TIMEOUT,TIMEOUT,TIMEOUT,N/A,destroyed" >> "$RESULTS_FILE"
-        terraform destroy -auto-approve
+        terraform destroy -auto-approve >> "$TERRAFORM_LOG" 2>&1
         return 1
     fi
     
@@ -173,7 +175,7 @@ test_instance() {
         echo "Destroying instance #$instance_num (TCP Connect P99: ${tcp_p99}ms >= ${TARGET_LATENCY}ms)..."
         # Update CSV to mark as destroyed
         sed -i "s/$region,$az,$instance_num,.*,pending$/$region,$az,$instance_num,$tcp_p99,$ping_p99,$trade_p99,$instance_ip,destroyed/" "$RESULTS_FILE"
-        terraform destroy -auto-approve
+        terraform destroy -auto-approve -compact-warnings >> "$TERRAFORM_LOG" 2>&1
     fi
     
     echo "Completed: $region / $az / Instance #$instance_num"
@@ -220,8 +222,8 @@ echo "=========================================="
 echo "Setting up shared resources (S3 + IAM)..."
 echo "=========================================="
 cd "$SHARED_DIR"
-terraform init
-terraform apply -auto-approve
+terraform init -upgrade >> "$TERRAFORM_LOG" 2>&1
+terraform apply -auto-approve -compact-warnings >> "$TERRAFORM_LOG" 2>&1
 
 # Get S3 bucket name for reference
 S3_BUCKET=$(terraform output -raw s3_bucket_name)
@@ -239,7 +241,7 @@ echo "=========================================="
 echo "Initializing EC2 terraform..."
 echo "=========================================="
 cd "$EC2_DIR"
-terraform init
+terraform init -upgrade >> "$TERRAFORM_LOG" 2>&1
 
 # Test multiple instances in target zone
 echo ""
