@@ -27,7 +27,7 @@ INSTANCE_TYPE="${INSTANCE_TYPE:-$(read_tfvar instance_type)}"
 POLL_INTERVAL="${POLL_INTERVAL:-30}"     # how often to check S3 for results
 MAX_WAIT="${MAX_WAIT:-600}"              # max seconds to wait for results (5 min)
 TARGET_LATENCY="${TARGET_LATENCY:-1}"    # Keep instances below this latency (ms)
-NUM_INSTANCES="${NUM_INSTANCES:-10}"      # Number of instances to test
+NUM_INSTANCES="${NUM_INSTANCES:-1}"      # Number of instances to test
 
 # Results directory (all results go here)
 RESULTS_BASE="$SCRIPT_DIR/results"
@@ -88,16 +88,18 @@ test_instance() {
     s3_bucket=$(terraform output -raw s3_bucket_name || echo "unknown")
     
     # Log EC2 info prominently for debugging
+    local created_time=$(date '+%Y-%m-%d %H:%M:%S %Z')
     log ""
-    log "╔════════════════════════════════════════════════════════════╗"
-    log "║  EC2 INSTANCE CREATED #$instance_num                       ║"
-    log "╠════════════════════════════════════════════════════════════╣"
-    log "║  Instance ID: $instance_id"
-    log "║  Public IP:   $instance_ip"
-    log "║  Region:      $region"
-    log "║  AZ:          $az"
-    log "║  S3 Bucket:   $s3_bucket"
-    log "╚════════════════════════════════════════════════════════════╝"
+    log "╔══════════════════════════════════════════════════════════════════════════════╗"
+    log "$(printf "║  %-75s ║" "EC2 INSTANCE CREATED #$instance_num")"
+    log "╠══════════════════════════════════════════════════════════════════════════════╣"
+    log "$(printf "║  %-75s ║" "Instance ID: $instance_id")"
+    log "$(printf "║  %-75s ║" "Public IP:   $instance_ip")"
+    log "$(printf "║  %-75s ║" "Region:      $region")"
+    log "$(printf "║  %-75s ║" "AZ:          $az")"
+    log "$(printf "║  %-75s ║" "S3 Bucket:   $s3_bucket")"
+    log "$(printf "║  %-75s ║" "Created:     $created_time")"
+    log "╚══════════════════════════════════════════════════════════════════════════════╝"
     log ""
     
     echo "Instance will auto-run test and upload results to S3..."
@@ -122,6 +124,15 @@ test_instance() {
             # Download results log
             local local_file="$RESULTS_DIR/${region}_${az}_inst${instance_num}_latency.log"
             aws s3 cp "s3://$s3_bucket/results/$s3_filename" "$local_file" --region "$region"
+            
+            # Also download network analysis JSON if it exists
+            local network_file
+            network_file=$(aws s3 ls "s3://$s3_bucket/results/network_analysis_${region}_${az}_inst${instance_num}_" --region "$region" 2>/dev/null | tail -1 | awk '{print $4}' || true)
+            if [ -n "$network_file" ]; then
+                local local_network_file="$RESULTS_DIR/${region}_${az}_inst${instance_num}_network.json"
+                aws s3 cp "s3://$s3_bucket/results/$network_file" "$local_network_file" --region "$region"
+                echo "  Network analysis downloaded: $local_network_file"
+            fi
             
             # Parse P99 results from log (format: "  tcp_connect          : 0.123 ms")
             local tcp_p99 ping_p99 trade_p99
@@ -166,6 +177,16 @@ test_instance() {
             echo "   Workspace: $workspace_name"
             echo "   To destroy later: cd ec2 && terraform workspace select $workspace_name && terraform destroy"
             should_destroy=false
+            
+            # Send Telegram alert
+            if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+                echo "Sending Telegram notification..."
+                curl -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+                    -H 'Content-type: application/json' \
+                    --data "{\"chat_id\":${TELEGRAM_CHAT_ID},\"text\":\"⚚ *ICON TRADING*\\n🎯 Low Latency Instance Found\\!\\n\\nTCP P99: ${tcp_p99}ms\\nRegion: ${region}\\nAZ: ${az}\\nIP: ${instance_ip}\",\"parse_mode\":\"Markdown\"}" \
+                    -s > /dev/null || echo "Failed to send Telegram notification"
+            fi
+            
             # Update CSV to mark as kept
             sed -i "s/$region,$az,$instance_num,.*,pending$/$region,$az,$instance_num,$tcp_p99,$ping_p99,$trade_p99,$instance_ip,KEPT/" "$RESULTS_FILE"
         fi
@@ -302,4 +323,51 @@ if [ "$best_status" = "KEPT" ]; then
     echo "   WS Ping/Pong P99: ${best_ping_p99}ms (reference)"
 else
     echo "Best TCP Connect P99 latency achieved: ${best_tcp_p99}ms (instance was destroyed)"
+fi
+
+# Send Telegram summary
+if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+    echo ""
+    echo "Sending Telegram summary..."
+    
+    # Build mobile-friendly message with proper newlines
+    msg="🔍 *Latency Sweep Complete*\n\n"
+    msg+="📊 *Results Summary*\n"
+    msg+="• Tested: ${NUM_INSTANCES} instances\n"
+    msg+="• Region: ${TARGET_REGION}\n"
+    msg+="• AZ: ${TARGET_AZ}\n"
+    msg+="• Type: ${INSTANCE_TYPE}\n\n"
+    
+    if [ "$kept_count" -gt 0 ]; then
+        msg+="✅ *Kept: ${kept_count} instance(s)*\n"
+        msg+="(TCP P99 < ${TARGET_LATENCY}ms)\n\n"
+        
+        # List kept instances
+        msg+="🖥 *Running Instances:*\n"
+        while IFS=',' read -r region az inst tcp ping trade ip status; do
+            if [ "$status" = "KEPT" ]; then
+                msg+="• \`${ip}\`\n"
+                msg+="  TCP: ${tcp}ms | Ping: ${ping}ms\n"
+            fi
+        done < <(grep ",KEPT$" "$RESULTS_FILE")
+    else
+        msg+="❌ *No instances kept*\n"
+        msg+="(None met <${TARGET_LATENCY}ms target)\n"
+    fi
+    
+    msg+="\n─────────────────────\n"
+    msg+="🏆 *Best Result*\n"
+    msg+="TCP P99: \`${best_tcp_p99}ms\`\n"
+    msg+="WS Ping P99: ${best_ping_p99}ms\n"
+    if [ "$best_status" = "KEPT" ]; then
+        msg+="IP: \`${best_ip}\`\n"
+        msg+="Status: Running ✅"
+    else
+        msg+="Status: Destroyed 🗑"
+    fi
+    
+    curl -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+        -H 'Content-type: application/json' \
+        --data "{\"chat_id\":${TELEGRAM_CHAT_ID},\"text\":\"${msg}\",\"parse_mode\":\"Markdown\"}" \
+        -s > /dev/null || echo "⚠ Failed to send Telegram summary"
 fi
