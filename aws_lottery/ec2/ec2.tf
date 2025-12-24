@@ -137,6 +137,11 @@ resource "aws_eip" "main" {
 resource "aws_eip_association" "main" {
   network_interface_id = aws_network_interface.main.id
   allocation_id        = aws_eip.main.id
+
+  depends_on = [
+    aws_instance.latency_test,
+    null_resource.enable_ena_express
+  ]
 }
 
 # Outputs
