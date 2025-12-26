@@ -4,7 +4,10 @@ resource "aws_vpc" "binance" {
   enable_dns_hostnames = true
 
   tags = {
-    Name = "binance-vpc-steven"
+    Name      = "binance-vpc-steven"
+    Owner     = "steven"  # TODO: Make this a variable
+    ManagedBy = "terraform"
+    Project   = "binance-latency-test"
   }
 }
 
