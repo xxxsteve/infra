@@ -2,9 +2,9 @@ aws_region = "ap-northeast-1"
 availability_zone = "ap-northeast-1c"
 # instance_type = "t2.micro"
 # instance_type = "c7i.metal-48xl"
-instance_type = "c7gn.16xlarge"
-# architecture = "x86_64"
-architecture = "arm64"
+instance_type = "c7i.24xlarge"
+architecture = "x86_64"
+# architecture = "arm64"
 
 # Your existing EC2 key pair name
 key_pair_name = "aws-steven-2026"

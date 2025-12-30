@@ -27,14 +27,15 @@ pip3 install --break-system-packages websocket-client numpy awscli
 mkdir -p /home/ubuntu/latency_tests
 cd /home/ubuntu/latency_tests
 
-# Download scripts from S3
-echo "Downloading scripts from S3..."
-aws s3 cp "s3://${s3_bucket}/scripts/network_analysis.py" /home/ubuntu/latency_tests/network_analysis.py --region ${region}
-aws s3 cp "s3://${s3_bucket}/scripts/ws_latency.py" /home/ubuntu/latency_tests/ws_latency.py --region ${region}
-aws s3 cp "s3://${s3_bucket}/scripts/tune_system.sh" /home/ubuntu/latency_tests/tune_system.sh --region ${region}
+# Download all scripts from S3
+echo "Downloading all scripts from S3..."
+aws s3 sync "s3://${s3_bucket}/scripts/" /home/ubuntu/latency_tests/ --region ${region}
 
-chmod +x /home/ubuntu/latency_tests/*.py /home/ubuntu/latency_tests/*.sh
+# Set permissions
+chmod +x /home/ubuntu/latency_tests/*.py /home/ubuntu/latency_tests/*.sh /home/ubuntu/latency_tests/rs
 chown -R ubuntu:ubuntu /home/ubuntu/latency_tests
+
+echo "✓ All scripts downloaded from S3"
 
 echo "Scripts downloaded. Running network path analytics and latency testing..."
 
@@ -50,10 +51,10 @@ su - ubuntu -c 'cd /home/ubuntu/latency_tests && BINANCE_ENDPOINTS='"'"'${binanc
 # Upload network analysis results
 RESULTS_FILE=$(ls -t /home/ubuntu/latency_tests/network_analysis_*.json 2>/dev/null | head -1)
 if [ -n "$RESULTS_FILE" ]; then
-    FILENAME="results/network_analysis_${region}_${availability_zone}_inst${instance_num}_$(date +%s).json"
+    FILENAME="results/network_analysis_${region}_${availability_zone}_inst${instance_num}.json"
     aws s3 cp "$RESULTS_FILE" "s3://${s3_bucket}/$FILENAME" --region ${region} && echo "Network analysis uploaded to S3"
     else
-    aws s3 cp /home/ubuntu/latency_tests/network_analysis.log "s3://${s3_bucket}/results/error_network_${region}_${availability_zone}_inst${instance_num}_$(date +%s).log" --region ${region}
+    aws s3 cp /home/ubuntu/latency_tests/network_analysis.log "s3://${s3_bucket}/results/error_network_${region}_${availability_zone}_inst${instance_num}.log" --region ${region}
 fi
 
 # Run full latency test suite (TCP, WS Ping/Pong, Trade Stream)
@@ -61,6 +62,32 @@ echo "Running full latency test suite..."
 su - ubuntu -c 'cd /home/ubuntu/latency_tests && python3 ws_latency.py --method full --samples 1000 --host fstream.binance.com > /home/ubuntu/latency_tests/latency.log 2>&1'
 
 # Upload log
-aws s3 cp /home/ubuntu/latency_tests/latency.log "s3://${s3_bucket}/results/latency_${region}_${availability_zone}_inst${instance_num}_$(date +%s).log" --region ${region}
+aws s3 cp /home/ubuntu/latency_tests/latency.log "s3://${s3_bucket}/results/latency_${region}_${availability_zone}_inst${instance_num}.log" --region ${region}
+
+# Run rs binary for WS API latency test ####################
+echo "Running rs latency test..."
+RS_OUTPUT="/home/ubuntu/latency_tests"
+su - ubuntu -c "cd /home/ubuntu/latency_tests && ./rs latency_test BTCUSDT $RS_OUTPUT"
+
+# Upload rs latency results (both order and orderbook files)
+ORDER_FILE="$RS_OUTPUT/order_latency_test.json"
+ORDERBOOK_FILE="$RS_OUTPUT/orderbook_latency_test.json"
+
+if [ -f "$ORDER_FILE" ]; then
+    aws s3 cp "$ORDER_FILE" "s3://${s3_bucket}/results/order_latency_${region}_${availability_zone}_inst${instance_num}.json" --region ${region}
+    echo "RS order latency results uploaded to S3"
+else
+    echo "ERROR: RS order latency test failed - no output JSON"
+    exit 1
+fi
+
+if [ -f "$ORDERBOOK_FILE" ]; then
+    aws s3 cp "$ORDERBOOK_FILE" "s3://${s3_bucket}/results/orderbook_latency_${region}_${availability_zone}_inst${instance_num}.json" --region ${region}
+    echo "RS orderbook latency results uploaded to S3"
+else
+    echo "ERROR: RS orderbook latency test failed - no output JSON"
+    exit 1
+fi
+############################################################
 
 echo "Done! All tests completed and results uploaded"

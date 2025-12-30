@@ -24,3 +24,9 @@ override.tf.json
 # Results directory
 results/
 __pycache__/
+
+binance_config.yaml
+rs_config.yaml
+secrets.yaml
+rs
+Private_key.pem

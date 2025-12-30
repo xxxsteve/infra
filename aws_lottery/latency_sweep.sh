@@ -25,9 +25,9 @@ INSTANCE_TYPE="${INSTANCE_TYPE:-$(read_tfvar instance_type)}"
 
 # Script-only variables (not in Terraform)
 POLL_INTERVAL="${POLL_INTERVAL:-30}"     # how often to check S3 for results
-MAX_WAIT="${MAX_WAIT:-600}"              # max seconds to wait for results (5 min)
-TARGET_LATENCY="${TARGET_LATENCY:-1}"    # Keep instances below this latency (ms)
-NUM_INSTANCES="${NUM_INSTANCES:-1}"      # Number of instances to test
+MAX_WAIT="${MAX_WAIT:-600}"              # max seconds to wait for results
+TARGET_LATENCY="${TARGET_LATENCY:-4}"  # Keep instances below this latency (ms)
+NUM_INSTANCES="${NUM_INSTANCES:-20}"      # Number of instances to test
 
 # Results directory (all results go here)
 RESULTS_BASE="$SCRIPT_DIR/results"
@@ -42,7 +42,7 @@ log() {
     echo "$@" | tee -a "$LOG_FILE"
 }
 
-echo "region,az,instance,tcp_p99_ms,ping_p99_ms,trade_p99_ms,instance_ip,kept" > "$RESULTS_FILE"
+echo "region,az,instance,tcp_p99_ms,ping_p99_ms,trade_p99_ms,order_p99_ms,orderbook_p99_ms,order_median_ms,orderbook_median_ms,,combined_ms,instance_ip,kept" > "$RESULTS_FILE"
 
 # Function to test a single instance
 test_instance() {
@@ -63,9 +63,8 @@ test_instance() {
 
     # Clean up old S3 result files to avoid false matches
     local s3_bucket_name="binance-latency-results-steven"
-    local s3_prefix="results/latency_${region}_${az}_inst${instance_num}_"
-    echo "Cleaning up old S3 results with prefix: $s3_prefix"
-    aws s3 rm "s3://$s3_bucket_name/" --recursive --exclude "*" --include "${s3_prefix}*" 2>/dev/null || true
+    echo "Cleaning up old S3 results for instance ${instance_num}"
+    aws s3 rm "s3://$s3_bucket_name/results/" --recursive --exclude "*" --include "*_${region}_${az}_inst${instance_num}*" 2>/dev/null || true
 
     # Apply terraform
     echo "  Creating instance..."
@@ -118,28 +117,77 @@ test_instance() {
     local results_found=false
     
     while [ $waited -lt $MAX_WAIT ]; do
-        # Check if latency log file exists in S3
+        # Check if orderbook latency JSON file exists in S3 (indicates test completion)
         local s3_results
-        s3_results=$(aws s3 ls "s3://$s3_bucket/results/latency_${region}_${az}_inst${instance_num}_" --region "$region" 2>/dev/null | tail -1 || true)
+        s3_results=$(aws s3 ls "s3://$s3_bucket/results/orderbook_latency_${region}_${az}_inst${instance_num}" --region "$region" 2>/dev/null | tail -1 || true)
         
         if [ -n "$s3_results" ]; then
             echo "✓ Results found in S3!"
             
-            # Extract filename from ls output
-            local s3_filename
-            s3_filename=$(echo "$s3_results" | awk '{print $4}')
-            
-            # Download results log
+            # Download latency log (contains tcp, ping, trade p99 metrics)
+            local latency_log_file
+            latency_log_file=$(aws s3 ls "s3://$s3_bucket/results/latency_${region}_${az}_inst${instance_num}.log" --region "$region" 2>/dev/null | tail -1 | awk '{print $4}' || true)
             local local_file="$RESULTS_DIR/${region}_${az}_inst${instance_num}_latency.log"
-            aws s3 cp "s3://$s3_bucket/results/$s3_filename" "$local_file" --region "$region"
+            if [ -n "$latency_log_file" ]; then
+                aws s3 cp "s3://$s3_bucket/results/$latency_log_file" "$local_file" --region "$region"
+                echo "  Latency log downloaded: $local_file"
+            else
+                echo "  Warning: Latency log not found in S3"
+                # Create empty file so grep doesn't fail
+                touch "$local_file"
+            fi
             
             # Also download network analysis JSON if it exists
             local network_file
-            network_file=$(aws s3 ls "s3://$s3_bucket/results/network_analysis_${region}_${az}_inst${instance_num}_" --region "$region" 2>/dev/null | tail -1 | awk '{print $4}' || true)
+            network_file=$(aws s3 ls "s3://$s3_bucket/results/network_analysis_${region}_${az}_inst${instance_num}.json" --region "$region" 2>/dev/null | tail -1 | awk '{print $4}' || true)
             if [ -n "$network_file" ]; then
                 local local_network_file="$RESULTS_DIR/${region}_${az}_inst${instance_num}_network.json"
                 aws s3 cp "s3://$s3_bucket/results/$network_file" "$local_network_file" --region "$region"
                 echo "  Network analysis downloaded: $local_network_file"
+            fi
+            
+            # Download rs latency test results (both order and orderbook files)
+            local order_median="N/A"
+            local orderbook_median="N/A"
+            local order_p99="N/A"
+            
+            # Download order latency test results
+            local order_latency_file
+            order_latency_file=$(aws s3 ls "s3://$s3_bucket/results/order_latency_${region}_${az}_inst${instance_num}" --region "$region" 2>/dev/null | tail -1 | awk '{print $4}' || true)
+            if [ -n "$order_latency_file" ]; then
+                local local_order_file="$RESULTS_DIR/${region}_${az}_inst${instance_num}_order_latency.json"
+                aws s3 cp "s3://$s3_bucket/results/$order_latency_file" "$local_order_file" --region "$region"
+                echo "  Order latency test downloaded: $local_order_file"
+                # Parse median from JSON (in nanoseconds, convert to milliseconds)
+                local median_ns p99_ns
+                median_ns=$(jq -r '.statistics_ns.median // empty' "$local_order_file" 2>/dev/null || echo "")
+                p99_ns=$(jq -r '.statistics_ns.p99 // empty' "$local_order_file" 2>/dev/null || echo "")
+                if [ -n "$median_ns" ]; then
+                    order_median=$(echo "scale=3; $median_ns / 1000000" | bc)
+                fi
+                if [ -n "$p99_ns" ]; then
+                    order_p99=$(echo "scale=3; $p99_ns / 1000000" | bc)
+                fi
+            fi
+            
+            # Download orderbook latency test results
+            local orderbook_latency_file
+            local orderbook_p99="N/A"
+            orderbook_latency_file=$(aws s3 ls "s3://$s3_bucket/results/orderbook_latency_${region}_${az}_inst${instance_num}" --region "$region" 2>/dev/null | tail -1 | awk '{print $4}' || true)
+            if [ -n "$orderbook_latency_file" ]; then
+                local local_orderbook_file="$RESULTS_DIR/${region}_${az}_inst${instance_num}_orderbook_latency.json"
+                aws s3 cp "s3://$s3_bucket/results/$orderbook_latency_file" "$local_orderbook_file" --region "$region"
+                echo "  Orderbook latency test downloaded: $local_orderbook_file"
+                # Parse median and p99 from JSON (in nanoseconds, convert to milliseconds)
+                local ob_median_ns ob_p99_ns
+                ob_median_ns=$(jq -r '.statistics_ns.median // empty' "$local_orderbook_file" 2>/dev/null || echo "")
+                ob_p99_ns=$(jq -r '.statistics_ns.p99 // empty' "$local_orderbook_file" 2>/dev/null || echo "")
+                if [ -n "$ob_median_ns" ]; then
+                    orderbook_median=$(echo "scale=3; $ob_median_ns / 1000000" | bc)
+                fi
+                if [ -n "$ob_p99_ns" ]; then
+                    orderbook_p99=$(echo "scale=3; $ob_p99_ns / 1000000" | bc)
+                fi
             fi
             
             # Parse P99 results from log (format: "  tcp_connect          : 0.123 ms")
@@ -148,12 +196,18 @@ test_instance() {
             ping_p99=$(grep "ws_ping_pong" "$local_file" | tail -1 | awk '{print $3}' || echo "N/A")
             trade_p99=$(grep "trade_stream" "$local_file" | tail -1 | awk '{print $3}' || echo "N/A")
             
+            # Calculate combined latency (0.5 * order_median + orderbook_median)
+            local combined_ms="N/A"
+            if [ "$order_median" != "N/A" ] && [ "$orderbook_median" != "N/A" ]; then
+                combined_ms=$(echo "scale=3; 0.5 * $order_median + $orderbook_median" | bc)
+            fi
+            
             # Save to results file
             local instance_ip
             instance_ip=$(terraform output -raw instance_public_ip 2>/dev/null || echo 'N/A')
-            echo "$region,$az,$instance_num,$tcp_p99,$ping_p99,$trade_p99,$instance_ip,pending" >> "$RESULTS_FILE"
+            echo "$region,$az,$instance_num,$tcp_p99,$ping_p99,$trade_p99,$order_p99,$orderbook_p99,$order_median,$orderbook_median,$combined_ms,$instance_ip,pending" >> "$RESULTS_FILE"
             
-            echo "Results: TCP P99=${tcp_p99}ms, WS Ping P99=${ping_p99}ms, Trade P99=${trade_p99}ms"
+            echo "Results: Orderbook Median=${orderbook_median}ms, Order Median=${order_median}ms, Combined=${combined_ms}ms"
             results_found=true
             break
         fi
@@ -167,7 +221,7 @@ test_instance() {
     if [ "$results_found" = false ]; then
         echo "⚠ Timeout: No results received after ${MAX_WAIT}s"
         echo "Check instance logs or S3 bucket for errors"
-        echo "$region,$az,$instance_num,TIMEOUT,TIMEOUT,TIMEOUT,N/A,destroyed" >> "$RESULTS_FILE"
+        echo "$region,$az,$instance_num,TIMEOUT,TIMEOUT,TIMEOUT,TIMEOUT,TIMEOUT,TIMEOUT,TIMEOUT,TIMEOUT,N/A,destroyed" >> "$RESULTS_FILE"
         
         # Retry terraform destroy for timeout case
         local timeout_destroy_success=false
@@ -187,15 +241,23 @@ test_instance() {
         return 1
     fi
     
-    # Cleanup decision based on TCP Connect P99 latency from ws_latency.py
+    # Cleanup decision based on combined latency (order_median + orderbook_median)
     local should_destroy=true
     local instance_ip
     instance_ip=$(terraform output -raw instance_public_ip 2>/dev/null || echo 'N/A')
     
-    if [ "$results_found" = true ] && [ "$tcp_p99" != "N/A" ]; then
-        # Check if TCP P99 latency is below target
-        if (( $(echo "$tcp_p99 < $TARGET_LATENCY" | bc -l) )); then
-            echo "🎯 EXCELLENT LATENCY: TCP P99 ${tcp_p99}ms < ${TARGET_LATENCY}ms - KEEPING INSTANCE #$instance_num!"
+    # Use combined latency (0.5 * order median + orderbook median) for comparison
+    local compare_latency="$combined_ms"
+    local compare_label="Combined (0.5 * Order + Orderbook Median)"
+    
+    if [ "$results_found" = true ] && [ "$compare_latency" != "N/A" ]; then
+        # Check if latency is below target
+        echo "Comparing: ${compare_latency}ms (${compare_label}) vs target ${TARGET_LATENCY}ms"
+        comparison_result=$(echo "$compare_latency < $TARGET_LATENCY" | bc -l)
+        echo "Comparison result: $comparison_result (1=keep, 0=destroy)"
+        if (( comparison_result )); then
+            echo "🎯 EXCELLENT LATENCY: ${compare_label} ${compare_latency}ms < ${TARGET_LATENCY}ms - KEEPING INSTANCE #$instance_num!"
+            echo "   Formula: 0.5 * ${order_median}ms + ${orderbook_median}ms = ${compare_latency}ms"
             echo "   Instance IP: $instance_ip"
             echo "   Workspace: $workspace_name"
             echo "   To destroy later: cd ec2 && terraform workspace select $workspace_name && terraform destroy"
@@ -204,21 +266,24 @@ test_instance() {
             # Send Telegram alert
             if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
                 echo "Sending Telegram notification..."
+                local tg_msg="⚔ *ICON TRADING*\\n🎯 Low Latency Instance Found\\!\\n\\n${compare_label}: ${compare_latency}ms"
+                tg_msg+="\\nOrderbook Median: ${orderbook_median}ms"
+                tg_msg+="\\nOrder Median: ${order_median}ms\\nRegion: ${region}\\nAZ: ${az}\\nIP: ${instance_ip}"
                 curl -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
                     -H 'Content-type: application/json' \
-                    --data "{\"chat_id\":${TELEGRAM_CHAT_ID},\"text\":\"⚚ *ICON TRADING*\\n🎯 Low Latency Instance Found\\!\\n\\nTCP P99: ${tcp_p99}ms\\nRegion: ${region}\\nAZ: ${az}\\nIP: ${instance_ip}\",\"parse_mode\":\"Markdown\"}" \
+                    --data "{\"chat_id\":${TELEGRAM_CHAT_ID},\"text\":\"${tg_msg}\",\"parse_mode\":\"Markdown\"}" \
                     -s > /dev/null || echo "Failed to send Telegram notification"
             fi
             
             # Update CSV to mark as kept
-            sed -i "s/$region,$az,$instance_num,.*,pending$/$region,$az,$instance_num,$tcp_p99,$ping_p99,$trade_p99,$instance_ip,KEPT/" "$RESULTS_FILE"
+            sed -i "s/$region,$az,$instance_num,.*,pending$/$region,$az,$instance_num,$tcp_p99,$ping_p99,$trade_p99,$order_p99,$orderbook_p99,$order_median,$orderbook_median,$combined_ms,$instance_ip,KEPT/" "$RESULTS_FILE"
         fi
     fi
     
     if [ "$should_destroy" = true ]; then
-        echo "Destroying instance #$instance_num (TCP Connect P99: ${tcp_p99}ms >= ${TARGET_LATENCY}ms)..."
+        echo "Destroying instance #$instance_num (${compare_label}: ${compare_latency}ms >= ${TARGET_LATENCY}ms)..."
         # Update CSV to mark as destroyed
-        sed -i "s/$region,$az,$instance_num,.*,pending$/$region,$az,$instance_num,$tcp_p99,$ping_p99,$trade_p99,$instance_ip,destroyed/" "$RESULTS_FILE"
+        sed -i "s/$region,$az,$instance_num,.*,pending$/$region,$az,$instance_num,$tcp_p99,$ping_p99,$trade_p99,$order_p99,$orderbook_p99,$order_median,$orderbook_median,$combined_ms,$instance_ip,destroyed/" "$RESULTS_FILE"
         
         # Retry terraform destroy up to 3 times (handles race conditions)
         local destroy_success=false
@@ -270,6 +335,13 @@ fi
 
 if ! command -v aws &> /dev/null; then
     echo "ERROR: aws cli not found"
+    exit 1
+fi
+
+if ! command -v bc &> /dev/null; then
+    echo "ERROR: bc not found (required for float comparison)"
+    echo "Install: sudo apt install bc  # Ubuntu/Debian"
+    echo "     or: brew install bc      # macOS"
     exit 1
 fi
 
@@ -329,9 +401,9 @@ echo ""
 echo "Results saved to: $RESULTS_FILE"
 echo "Downloaded JSON files in: $RESULTS_DIR"
 echo ""
-echo "All tested instances (sorted by TCP Connect P99 latency):"
+echo "All tested instances (sorted by Combined latency):"
 echo ""
-sort -t',' -k4 -n "$RESULTS_FILE" | column -t -s','
+sort -t',' -k9 -n "$RESULTS_FILE" | column -t -s','
 
 # Show kept instances
 echo ""
@@ -339,35 +411,39 @@ echo "=========================================="
 kept_count=$(grep -c ",KEPT$" "$RESULTS_FILE" 2>/dev/null || echo "0")
 kept_count=$(echo "$kept_count" | tr -d '\n\r' | head -1)
 if [ "$kept_count" -gt 0 ]; then
-    echo "🎯 KEPT INSTANCES (TCP Connect P99 < ${TARGET_LATENCY}ms):"
+    echo "🎯 KEPT INSTANCES (Combined < ${TARGET_LATENCY}ms):"
     echo ""
-    grep ",KEPT$" "$RESULTS_FILE" | sort -t',' -k4 -n | column -t -s','
+    grep ",KEPT$" "$RESULTS_FILE" | sort -t',' -k9 -n | column -t -s','
 else
     echo "❌ No instances met the target latency of <${TARGET_LATENCY}ms"
     echo ""
     echo "Best result was:"
-    sort -t',' -k4 -n "$RESULTS_FILE" | grep -v "region" | head -1 | column -t -s','
+    sort -t',' -k9 -n "$RESULTS_FILE" | grep -v "region" | head -1 | column -t -s','
     echo ""
 fi
 
-# Find best instance
+# Find best instance (by combined latency)
 echo ""
 echo "🏆 BEST MACHINE:"
-best_line=$(sort -t',' -k4 -n "$RESULTS_FILE" | grep -v TIMEOUT | grep -v "region" | head -1)
+best_line=$(sort -t',' -k9 -n "$RESULTS_FILE" | grep -v TIMEOUT | grep -v "region" | head -1)
 echo "$best_line" | column -t -s','
 
 best_tcp_p99=$(echo "$best_line" | cut -d',' -f4)
 best_ping_p99=$(echo "$best_line" | cut -d',' -f5)
-best_ip=$(echo "$best_line" | cut -d',' -f7)
-best_status=$(echo "$best_line" | cut -d',' -f8)
+best_order_median=$(echo "$best_line" | cut -d',' -f7)
+best_order_p99=$(echo "$best_line" | cut -d',' -f8)
+best_orderbook_median=$(echo "$best_line" | cut -d',' -f9)
+best_orderbook_p99=$(echo "$best_line" | cut -d',' -f10)
+best_combined=$(echo "$best_line" | cut -d',' -f11)
+best_ip=$(echo "$best_line" | cut -d',' -f12)
+best_status=$(echo "$best_line" | cut -d',' -f13)
 
 echo ""
 if [ "$best_status" = "KEPT" ]; then
     echo "✅ Best machine is running at: $best_ip"
-    echo "   TCP Connect P99: ${best_tcp_p99}ms"
-    echo "   WS Ping/Pong P99: ${best_ping_p99}ms (reference)"
+    echo "   Combined: ${best_combined}ms (0.5 * ${best_order_median}ms + ${best_orderbook_median}ms)"
 else
-    echo "Best TCP Connect P99 latency achieved: ${best_tcp_p99}ms (instance was destroyed)"
+    echo "Best Combined latency achieved: ${best_combined}ms (instance was destroyed)"
 fi
 
 # Send Telegram summary
@@ -385,14 +461,14 @@ if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
     
     if [ "$kept_count" -gt 0 ]; then
         msg+="✅ *Kept: ${kept_count} instance(s)*\n"
-        msg+="(TCP P99 < ${TARGET_LATENCY}ms)\n\n"
+        msg+="(Combined < ${TARGET_LATENCY}ms)\n\n"
         
         # List kept instances
         msg+="🖥 *Running Instances:*\n"
-        while IFS=',' read -r region az inst tcp ping trade ip status; do
+        while IFS=',' read -r region az inst tcp ping trade ws_api order_p99 combined ip status; do
             if [ "$status" = "KEPT" ]; then
                 msg+="• \`${ip}\`\n"
-                msg+="  TCP: ${tcp}ms | Ping: ${ping}ms\n"
+                msg+="  Combined: ${combined}ms\n"
             fi
         done < <(grep ",KEPT$" "$RESULTS_FILE")
     else
@@ -402,8 +478,9 @@ if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
     
     msg+="\n─────────────────────\n"
     msg+="🏆 *Best Result*\n"
-    msg+="TCP P99: \`${best_tcp_p99}ms\`\n"
-    msg+="WS Ping P99: ${best_ping_p99}ms\n"
+    msg+="Combined: \`${best_combined}ms\`\n"
+    msg+="Orderbook Median: ${best_orderbook_median}ms\\n"
+    msg+="Order Median: ${best_order_median}ms\\n"
     if [ "$best_status" = "KEPT" ]; then
         msg+="IP: \`${best_ip}\`\n"
         msg+="Status: Running ✅"

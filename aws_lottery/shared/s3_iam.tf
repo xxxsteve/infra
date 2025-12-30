@@ -62,15 +62,24 @@ resource "aws_iam_role_policy" "s3_access" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:PutObjectAcl"
-      ]
-      Resource = "${aws_s3_bucket.results.arn}/*"
-    }]
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:PutObjectAcl"
+        ]
+        Resource = "${aws_s3_bucket.results.arn}/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket"
+        ]
+        Resource = aws_s3_bucket.results.arn
+      }
+    ]
   })
 }
 
@@ -85,26 +94,18 @@ resource "aws_iam_instance_profile" "instance_profile" {
   }
 }
 
-# Upload test scripts to S3
-resource "aws_s3_object" "network_analysis_script" {
-  bucket = aws_s3_bucket.results.id
-  key    = "scripts/network_analysis.py"
-  source = "${path.module}/../scripts/network_analysis.py"
-  etag   = filemd5("${path.module}/../scripts/network_analysis.py")
-}
+# Use null_resource to sync entire scripts folder to S3 (simpler and more reliable)
+resource "null_resource" "upload_scripts" {
+  triggers = {
+    # Trigger re-sync when any file in scripts directory changes
+    scripts_hash = sha256(join("", [for f in fileset("${path.module}/../scripts", "**") : fileexists("${path.module}/../scripts/${f}") ? filemd5("${path.module}/../scripts/${f}") : ""]))
+  }
 
-resource "aws_s3_object" "ws_latency_script" {
-  bucket = aws_s3_bucket.results.id
-  key    = "scripts/ws_latency.py"
-  source = "${path.module}/../scripts/ws_latency.py"
-  etag   = filemd5("${path.module}/../scripts/ws_latency.py")
-}
+  provisioner "local-exec" {
+    command = "aws s3 sync ${path.module}/../scripts s3://${aws_s3_bucket.results.id}/scripts/ --exclude '__pycache__/*' --delete"
+  }
 
-resource "aws_s3_object" "tune_system_script" {
-  bucket = aws_s3_bucket.results.id
-  key    = "scripts/tune_system.sh"
-  source = "${path.module}/../scripts/tune_system.sh"
-  etag   = filemd5("${path.module}/../scripts/tune_system.sh")
+  depends_on = [aws_s3_bucket.results]
 }
 
 # Outputs
