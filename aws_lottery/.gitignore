@@ -29,4 +29,4 @@ binance_config.yaml
 rs_config.yaml
 secrets.yaml
 rs
-Private_key.pem
+*.pem

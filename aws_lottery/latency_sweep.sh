@@ -43,7 +43,7 @@ log() {
     echo "$@" | tee -a "$LOG_FILE"
 }
 
-echo "region,az,instance,tcp_p99_ms,ping_p99_ms,trade_p99_ms,order_p99_ms,orderbook_p99_ms,tcp_p50_ms,order_p50_ms,orderbook_p50_ms,orderbook_mean_ms,combined_ms,instance_ip,kept" > "$RESULTS_FILE"
+echo "region,az,instance,tcp_p99_ms,ping_p99_ms,trade_p99_ms,order_p99_ms,orderbook_p99_ms,tcp_p50_ms,order_p50_ms,orderbook_p50_ms,orderbook_trimmed_mean_ms,combined_ms,instance_ip,kept" > "$RESULTS_FILE"
 
 # Helper function to retry terraform destroy and cleanup workspace
 cleanup_instance() {
@@ -168,7 +168,7 @@ test_instance() {
             fi
             
             # Download rs latency test results (both order and orderbook files)
-            local order_p50="N/A" orderbook_p50="N/A" orderbook_mean="N/A" order_p99="N/A" orderbook_p99="N/A"
+            local order_p50="N/A" orderbook_p50="N/A" orderbook_trimmed_mean="N/A" order_p99="N/A" orderbook_p99="N/A"
             
             # Download and parse order latency JSON
             local order_latency_file
@@ -192,14 +192,14 @@ test_instance() {
                 local local_orderbook_file="$RESULTS_DIR/${region}_${az}_inst${instance_num}_orderbook_latency.json"
                 aws s3 cp "s3://$s3_bucket/results/$orderbook_latency_file" "$local_orderbook_file" --region "$region"
                 echo "  Orderbook latency test downloaded: $local_orderbook_file"
-                # Parse p50, p99, and mean from JSON (nanoseconds -> milliseconds)
-                local ob_p50_ns ob_p99_ns ob_mean_ns
+                # Parse p50, p99, and trimmed_mean from JSON (nanoseconds -> milliseconds)
+                local ob_p50_ns ob_p99_ns ob_trimmed_mean_ns
                 ob_p50_ns=$(jq -r '.statistics_ns.median // empty' "$local_orderbook_file" 2>/dev/null || echo "")
                 ob_p99_ns=$(jq -r '.statistics_ns.p99 // empty' "$local_orderbook_file" 2>/dev/null || echo "")
-                ob_mean_ns=$(jq -r '.statistics_ns.mean // empty' "$local_orderbook_file" 2>/dev/null || echo "")
+                ob_trimmed_mean_ns=$(jq -r '.statistics_ns.trimmed_mean // empty' "$local_orderbook_file" 2>/dev/null || echo "")
                 [ -n "$ob_p50_ns" ] && orderbook_p50=$(echo "scale=3; $ob_p50_ns / 1000000" | bc)
                 [ -n "$ob_p99_ns" ] && orderbook_p99=$(echo "scale=3; $ob_p99_ns / 1000000" | bc)
-                [ -n "$ob_mean_ns" ] && orderbook_mean=$(echo "scale=3; $ob_mean_ns / 1000000" | bc)
+                [ -n "$ob_trimmed_mean_ns" ] && orderbook_trimmed_mean=$(echo "scale=3; $ob_trimmed_mean_ns / 1000000" | bc)
             fi
             
             # Parse P99 results from log (format: "  tcp_connect          : 0.123 ms")
@@ -209,16 +209,16 @@ test_instance() {
             ping_p99=$(grep "ws_ping_pong" "$local_file" | tail -1 | awk '{print $3}' || echo "N/A")
             trade_p99=$(grep "trade_stream" "$local_file" | tail -1 | awk '{print $3}' || echo "N/A")
             
-            # Calculate combined latency (0.5 * order_p50 + orderbook_mean)
+            # Calculate combined latency (0.5 * order_p50 + orderbook_trimmed_mean)
             local combined_ms="N/A"
-            if [ "$order_p50" != "N/A" ] && [ "$orderbook_mean" != "N/A" ]; then
-                combined_ms=$(echo "scale=3; 0.5 * $order_p50 + $orderbook_mean" | bc)
+            if [ "$order_p50" != "N/A" ] && [ "$orderbook_trimmed_mean" != "N/A" ]; then
+                combined_ms=$(echo "scale=3; 0.5 * $order_p50 + $orderbook_trimmed_mean" | bc)
             fi
             
             # Save to results file
-            echo "$region,$az,$instance_num,$tcp_p99,$ping_p99,$trade_p99,$order_p99,$orderbook_p99,$tcp_p50,$order_p50,$orderbook_p50,$orderbook_mean,$combined_ms,$instance_ip,pending" >> "$RESULTS_FILE"
+            echo "$region,$az,$instance_num,$tcp_p99,$ping_p99,$trade_p99,$order_p99,$orderbook_p99,$tcp_p50,$order_p50,$orderbook_p50,$orderbook_trimmed_mean,$combined_ms,$instance_ip,pending" >> "$RESULTS_FILE"
 
-            echo "Results: Orderbook Mean=${orderbook_mean}ms, Order P50=${order_p50}ms, Combined=${combined_ms}ms"
+            echo "Results: Orderbook Trimmed Mean=${orderbook_trimmed_mean}ms, Order P50=${order_p50}ms, Combined=${combined_ms}ms"
             results_found=true
             break
         fi
@@ -240,9 +240,9 @@ test_instance() {
     # Cleanup decision based on combined latency
     local should_destroy=true
     
-    # Use combined latency (0.5 * order_p50 + orderbook_mean) for comparison
+    # Use combined latency (0.5 * order_p50 + orderbook_trimmed_mean) for comparison
     local compare_latency="$combined_ms"
-    local compare_label="Combined (0.5 * Order P50 + Orderbook Mean)"
+    local compare_label="Combined (0.5 * Order P50 + Orderbook Trimmed Mean)"
     
     if [ "$results_found" = true ] && [ "$compare_latency" != "N/A" ]; then
         # Check if latency is below target
@@ -251,7 +251,7 @@ test_instance() {
         echo "Comparison result: $comparison_result (1=keep, 0=destroy)"
         if (( comparison_result )); then
             echo "🎯 EXCELLENT LATENCY: ${compare_label} ${compare_latency}ms < ${TARGET_LATENCY}ms - KEEPING INSTANCE #$instance_num!"
-            echo "   Formula: 0.5 * ${order_p50}ms + ${orderbook_mean}ms = ${compare_latency}ms"
+            echo "   Formula: 0.5 * ${order_p50}ms + ${orderbook_trimmed_mean}ms = ${compare_latency}ms"
             echo "   Instance IP: $instance_ip"
             echo "   Workspace: $workspace_name"
             echo "   To destroy later: cd ec2 && terraform workspace select $workspace_name && terraform destroy"
@@ -261,7 +261,7 @@ test_instance() {
             if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
                 echo "Sending Telegram notification..."
                 local tg_msg="⚔ *ICON TRADING*\\n🎯 Low Latency Instance Found\\!\\n\\n${compare_label}: ${compare_latency}ms"
-                tg_msg+="\\nOrderbook Mean: ${orderbook_mean}ms"
+                tg_msg+="\\nOrderbook Trimmed Mean: ${orderbook_trimmed_mean}ms"
                 tg_msg+="\\nOrder P50: ${order_p50}ms\\nRegion: ${region}\\nAZ: ${az}\\nIP: ${instance_ip}"
                 curl -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
                     -H 'Content-type: application/json' \
@@ -270,14 +270,14 @@ test_instance() {
             fi
             
             # Update CSV to mark as kept
-            sed -i "s/$region,$az,$instance_num,.*,pending$/$region,$az,$instance_num,$tcp_p99,$ping_p99,$trade_p99,$order_p99,$orderbook_p99,$tcp_p50,$order_p50,$orderbook_p50,$orderbook_mean,$combined_ms,$instance_ip,KEPT/" "$RESULTS_FILE"
+            sed -i "s/$region,$az,$instance_num,.*,pending$/$region,$az,$instance_num,$tcp_p99,$ping_p99,$trade_p99,$order_p99,$orderbook_p99,$tcp_p50,$order_p50,$orderbook_p50,$orderbook_trimmed_mean,$combined_ms,$instance_ip,KEPT/" "$RESULTS_FILE"
         fi
     fi
     
     if [ "$should_destroy" = true ]; then
         echo "Destroying instance #$instance_num (${compare_label}: ${compare_latency}ms >= ${TARGET_LATENCY}ms)..."
         # Update CSV to mark as destroyed
-        sed -i "s/$region,$az,$instance_num,.*,pending$/$region,$az,$instance_num,$tcp_p99,$ping_p99,$trade_p99,$order_p99,$orderbook_p99,$tcp_p50,$order_p50,$orderbook_p50,$orderbook_mean,$combined_ms,$instance_ip,destroyed/" "$RESULTS_FILE"
+        sed -i "s/$region,$az,$instance_num,.*,pending$/$region,$az,$instance_num,$tcp_p99,$ping_p99,$trade_p99,$order_p99,$orderbook_p99,$tcp_p50,$order_p50,$orderbook_p50,$orderbook_trimmed_mean,$combined_ms,$instance_ip,destroyed/" "$RESULTS_FILE"
         cleanup_instance "$workspace_name"
     fi
     
@@ -404,7 +404,7 @@ best_orderbook_p99=$(echo "$best_line" | cut -d',' -f8)
 best_tcp_p50=$(echo "$best_line" | cut -d',' -f9)
 best_order_p50=$(echo "$best_line" | cut -d',' -f10)
 best_orderbook_p50=$(echo "$best_line" | cut -d',' -f11)
-best_orderbook_mean=$(echo "$best_line" | cut -d',' -f12)
+best_orderbook_trimmed_mean=$(echo "$best_line" | cut -d',' -f12)
 best_combined=$(echo "$best_line" | cut -d',' -f13)
 best_ip=$(echo "$best_line" | cut -d',' -f14)
 best_status=$(echo "$best_line" | cut -d',' -f15)
@@ -412,7 +412,7 @@ best_status=$(echo "$best_line" | cut -d',' -f15)
 echo ""
 if [ "$best_status" = "KEPT" ]; then
     echo "✅ Best machine is running at: $best_ip"
-    echo "   Combined: ${best_combined}ms (0.5 * ${best_order_p50}ms + ${best_orderbook_mean}ms)"
+    echo "   Combined: ${best_combined}ms (0.5 * ${best_order_p50}ms + ${best_orderbook_trimmed_mean}ms)"
 else
     echo "Best Combined latency achieved: ${best_combined}ms (instance was destroyed)"
 fi
@@ -436,7 +436,7 @@ if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
         
         # List kept instances
         msg+="🖥 *Running Instances:*\n"
-        while IFS=',' read -r region az inst tcp ping trade order_p99 orderbook_p99 tcp_p50 order_p50 orderbook_p50 orderbook_mean combined ip status; do
+        while IFS=',' read -r region az inst tcp ping trade order_p99 orderbook_p99 tcp_p50 order_p50 orderbook_p50 orderbook_trimmed_mean combined ip status; do
             if [ "$status" = "KEPT" ]; then
                 msg+="• \`${ip}\`\n"
                 msg+="  Combined: ${combined}ms\n"
@@ -450,7 +450,7 @@ if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
     msg+="\n─────────────────────\n"
     msg+="🏆 *Best Result*\n"
     msg+="Combined: \`${best_combined}ms\`\n"
-    msg+="Orderbook Mean: ${best_orderbook_mean}ms\\n"
+    msg+="Orderbook Trimmed Mean: ${best_orderbook_trimmed_mean}ms\\n"
     msg+="Order P50: ${best_order_p50}ms\\n"
     if [ "$best_status" = "KEPT" ]; then
         msg+="IP: \`${best_ip}\`\n"
